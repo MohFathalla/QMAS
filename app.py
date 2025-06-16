@@ -1,6 +1,9 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.sql import func
 from datetime import datetime
+from models import db, Student, Admin, TestResult, Notification, Question
+
 import os
 
 # إعداد المسار الكامل للقاعدة
@@ -15,45 +18,10 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'DB
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # تهيئة قاعدة البيانات
-db = SQLAlchemy(app)
+db.init_app(app)
 
-# تعريف النماذج
-class Student(db.Model):
-    __tablename__ = 'students'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    phone = db.Column(db.String(20))
-    password_hash = db.Column(db.String(128), nullable=False)
-    status = db.Column(db.String(20), default='Pending')
-    registration_date = db.Column(db.DateTime, default=datetime.utcnow)
 
-    test_results = db.relationship('TestResult', backref='student', cascade="all, delete-orphan")
-    notifications = db.relationship('Notification', backref='student', cascade="all, delete-orphan")
 
-class Admin(db.Model):
-    __tablename__ = 'admins'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128), nullable=False)
-    role = db.Column(db.String(20), default='admin')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class TestResult(db.Model):
-    __tablename__ = 'test_results'
-    id = db.Column(db.Integer, primary_key=True)
-    student_id = db.Column(db.Integer, db.ForeignKey('students.id'), nullable=False)
-    score = db.Column(db.Integer, nullable=False)
-    status = db.Column(db.String(20), nullable=False)
-    submission_date = db.Column(db.DateTime, default=datetime.utcnow)
-
-class Notification(db.Model):
-    __tablename__ = 'notifications'
-    id = db.Column(db.Integer, primary_key=True)
-    student_id = db.Column(db.Integer, db.ForeignKey('students.id'), nullable=False)
-    message = db.Column(db.Text, nullable=False)
-    sent_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 # إنشاء الجداول
 with app.app_context():
@@ -64,30 +32,35 @@ def take_test(student_id):
     student = Student.query.get_or_404(student_id)
 
     if request.method == 'POST':
-        total_score = 0
-        for i in range(1, 11):
-            answer = int(request.form.get(f'q{i}', 0))
-            total_score += answer
+        answers = request.form
+        correct = 0
+        for qid, user_answer in answers.items():
+            question = Question.query.get(int(qid))
+            if question and question.correct_option == user_answer:
+                correct += 1
 
-        status = 'Pass' if total_score >= 6 else 'Fail'
-
-        result = TestResult(student_id=student.id, score=total_score, status=status)
+        status = 'Pass' if correct >= 6 else 'Fail'
+        result = TestResult(student_id=student.id, score=correct, status=status)
         db.session.add(result)
         db.session.commit()
 
-        flash(f'Test submitted! You scored {total_score}/10 ({status})', 'info')
+        flash(f'تم تقديم الاختبار. الدرجة: {correct}/10 - {"ناجح" if status == "Pass" else "راسب"}', 'info')
         return redirect(url_for('dashboard', student_id=student.id))
 
-    return render_template('test.html')
+    questions = Question.query.order_by(func.random()).limit(10).all()
+    return render_template('test.html', questions=questions, student=student)
+
 
 
 @app.route('/dashboard/<int:student_id>')
 def dashboard(student_id):
     student = Student.query.get_or_404(student_id)
-    test_result = TestResult.query.filter_by(student_id=student.id).first()
-    notifications = Notification.query.filter_by(student_id=student.id).all()
+    test_result = TestResult.query.filter_by(student_id=student.id).order_by(TestResult.submission_date.desc()).first()
+    all_results = TestResult.query.filter_by(student_id=student.id).order_by(TestResult.submission_date.desc()).all()
+    notifications = Notification.query.filter_by(student_id=student.id).order_by(Notification.sent_at.desc()).all()
+    return render_template('dashboard.html', student=student, test_result=test_result,
+                           all_results=all_results, notifications=notifications)
 
-    return render_template('dashboard.html', student=student, test_result=test_result, notifications=notifications)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -188,6 +161,21 @@ def send_notification():
 
     return render_template('notifications.html', students=students)
 
+@app.route('/admin/add-question', methods=['GET', 'POST'])
+def add_question():
+    if request.method == 'POST':
+        question = Question(
+            text=request.form['text'],
+            option_a=request.form['option_a'],
+            option_b=request.form['option_b'],
+            option_c=request.form['option_c'],
+            correct_option=request.form['correct_option']
+        )
+        db.session.add(question)
+        db.session.commit()
+        flash("تمت إضافة السؤال بنجاح", 'success')
+        return redirect(url_for('add_question'))
+    return render_template('add_question.html')
 
 
 # Route: صفحة تسجيل الطالب
